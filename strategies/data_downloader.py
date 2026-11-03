@@ -61,4 +61,4 @@ def download_us100_data():
     print("Please check your internet connection or try running this again later.")
 
 if __name__ == "__main__":
-    download_us100_data()
+    download_us100_data ==()
