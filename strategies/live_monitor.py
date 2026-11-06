@@ -18,7 +18,7 @@ POINT_VALUE_PER_LOT = 10.0
 WAT_TZ = pytz.timezone('Africa/Lagos')
 
 # UPDATED: We now use a JSON file for state management
-LOG_DIR = os.path.join(os.path.dirname(__file__), 'logs')
+LOG_DIR = os.path.join(os.path.dirname(__file__), '..', 'logs')
 os.makedirs(LOG_DIR, exist_ok=True)
 STATE_FILE = os.path.join(LOG_DIR, 'state.json')
 
