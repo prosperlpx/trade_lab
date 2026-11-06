@@ -1,0 +1,31 @@
+name: US100 VWAP Trading Bot
+
+on:
+  schedule:
+    # Runs every 5 minutes between 13:00 and 19:00 UTC (14:00 to 20:00 WAT)
+    # Monday (1) to Friday (5)
+    - cron: '*/5 13-19 * * 1-5'
+  workflow_dispatch: # Allows you to run it manually for testing
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install yfinance pandas numpy pytz
+
+      - name: Run Live Monitor
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python strategies/live_monitor.py
