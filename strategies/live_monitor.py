@@ -3,25 +3,24 @@ import pandas as pd
 import numpy as np
 import os
 import urllib.request
-import json
+import json # Make sure json is imported
 from datetime import datetime
 import pytz
 
 # --- CONFIGURATION ---
-# We now pull these from GitHub Secrets for security
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '9021072400:AAG51CMX_R53Jc6Qp6tOJNP2EBKwfrGu07w')
-CHAT_ID = os.environ.get('CHAT_ID', '8026415371')
+BOT_TOKEN = os.environ.get('BOT_TOKEN', 'YOUR_FALLBACK_TOKEN')
+CHAT_ID = os.environ.get('CHAT_ID', 'YOUR_FALLBACK_CHAT_ID')
 
 ACCOUNT_SIZE = 5000.0
-RISK_PER_TRADE_DOLLARS = 25.0      
-MAX_DAILY_LOSS_DOLLARS = 100.0     
-POINT_VALUE_PER_LOT = 10.0 
+RISK_PER_TRADE_DOLLARS = 25.0
+MAX_DAILY_LOSS_DOLLARS = 100.0
+POINT_VALUE_PER_LOT = 10.0
 WAT_TZ = pytz.timezone('Africa/Lagos')
 
-# GitHub Actions doesn't have a permanent file system, so we use a temporary directory for the log
+# UPDATED: We now use a JSON file for state management
 LOG_DIR = os.path.join(os.path.dirname(__file__), 'logs')
 os.makedirs(LOG_DIR, exist_ok=True)
-TRADED_DATES_FILE = os.path.join(LOG_DIR, 'traded_dates.txt')
+STATE_FILE = os.path.join(LOG_DIR, 'state.json')
 
 def get_online_wat_time():
     try:
@@ -34,8 +33,47 @@ def get_online_wat_time():
                 unix_ts = float(line.split('=')[1])
                 utc_dt = datetime.fromtimestamp(unix_ts, tz=pytz.UTC)
                 return utc_dt.astimezone(WAT_TZ)
-    except Exception as e:
+    except Exception:
         return datetime.now(WAT_TZ)
+
+# --- NEW JSON MEMORY FUNCTIONS ---
+def load_state():
+    """Loads the JSON state file. Creates a default one if it doesn't exist."""
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, 'r') as f:
+            return json.load(f)
+    else:
+        # Default state if the file doesn't exist yet
+        return {"traded_dates": [], "last_alert": None}
+
+def save_state(state_data):
+    """Saves the dictionary to the JSON file."""
+    with open(STATE_FILE, 'w') as f:
+        json.dump(state_data, f, indent=2)
+
+def has_traded_today():
+    """Checks the JSON state to see if we already alerted today."""
+    state = load_state()
+    today_str = get_online_wat_time().strftime('%Y-%m-%d')
+    return today_str in state["traded_dates"]
+
+def log_trade_today(direction, entry_price):
+    """Updates the JSON state with today's date and trade details."""
+    state = load_state()
+    today_str = get_online_wat_time().strftime('%Y-%m-%d')
+    
+    if today_str not in state["traded_dates"]:
+        state["traded_dates"].append(today_str)
+        
+    # Save extra details for future-proofing!
+    state["last_alert"] = {
+        "date": today_str,
+        "time": get_online_wat_time().strftime('%H:%M'),
+        "direction": direction,
+        "entry": entry_price
+    }
+    
+    save_state(state)
 
 def send_telegram_alert(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -47,30 +85,13 @@ def send_telegram_alert(message):
     except Exception as e:
         print(f"❌ Failed to send Telegram alert: {e}")
 
-def has_traded_today():
-    now_wat = get_online_wat_time()
-    today_str = now_wat.strftime('%Y-%m-%d')
-    if os.path.exists(TRADED_DATES_FILE):
-        with open(TRADED_DATES_FILE, 'r') as f:
-            if today_str in f.read().splitlines(): return True
-    return False
-
-def log_trade_today():
-    now_wat = get_online_wat_time()
-    with open(TRADED_DATES_FILE, 'a') as f:
-        f.write(now_wat.strftime('%Y-%m-%d') + '\n')
-
 def check_market_setup():
     now_wat = get_online_wat_time()
     print(f"⏳ Checking market setup at {now_wat.strftime('%Y-%m-%d %H:%M:%S')} WAT...")
     
-    # STRICT TIME CHECK: 14:30 to 20:00 WAT
     current_hour = now_wat.hour
-    current_minute = now_wat.minute
-    current_time_decimal = current_hour + (current_minute / 60)
-    
-    if not (14.5 <= current_time_decimal < 20):
-        print(f"   -> Outside trading window (Current WAT: {current_hour}:{current_minute:02d}). Standing by...")
+    if not (15 <= current_hour < 20):
+        print(f"   -> Outside trading window. Standing by...")
         return
 
     try:
@@ -142,10 +163,12 @@ def check_market_setup():
         
         print("   -> 🚨 SETUP CONFIRMED! Sending Telegram alert...")
         send_telegram_alert(message)
-        log_trade_today()
+        
+        # Save to JSON State
+        log_trade_today(direction, us100_entry)
     else:
         print("   -> No setup detected. Waiting...")
 
 if __name__ == "__main__":
-    # The script runs ONCE and exits. GitHub Actions will wake it up again in 5 minutes.
+    print("🚀 GitHub Actions triggered. Checking market setup...")
     check_market_setup()

@@ -24,8 +24,25 @@ jobs:
           python -m pip install --upgrade pip
           pip install yfinance pandas numpy pytz
 
+      # --- NEW: DOWNLOAD CLOUD MEMORY ---
+      - name: Download previous trade state
+        uses: actions/download-artifact@v4
+        with:
+          name: trade-state
+          path: ./logs
+        continue-on-error: true # Crucial: ignores error on the very first run when no file exists yet
+
       - name: Run Live Monitor
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: python strategies/live_monitor.py
+
+      # --- NEW: UPLOAD CLOUD MEMORY ---
+      - name: Upload updated trade state
+        uses: actions/upload-artifact@v4
+        with:
+          name: trade-state
+          path: ./logs/state.json
+          retention-days: 1 # We only need to remember today's trades
+          if-no-files-found: ignore
