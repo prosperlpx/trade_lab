@@ -12,7 +12,7 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN', 'YOUR_FALLBACK_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID', 'YOUR_FALLBACK_CHAT_ID')
 
 ACCOUNT_SIZE = 5000.0
-RISK_PER_TRADE_DOLLARS = 25.0
+RISK_PER_TRADE_DOLLARS = 50.0
 MAX_DAILY_LOSS_DOLLARS = 100.0
 POINT_VALUE_PER_LOT = 10.0
 WAT_TZ = pytz.timezone('Africa/Lagos')
@@ -134,13 +134,13 @@ def check_market_setup():
         qqq_entry = float(last_row['Close'])
         risk_dist = 1.5 * float(last_row['ATR'])
         qqq_sl = qqq_entry - risk_dist
-        qqq_tp = qqq_entry + (risk_dist * 1.5)
+        qqq_tp = qqq_entry + (risk_dist * 1.3)
     elif last_row['Close'] < last_row['VWAP'] and last_row['High'] >= last_row['VWAP'] * 0.999:
         setup_found, direction = True, "🔴 SHORT"
         qqq_entry = float(last_row['Close'])
         risk_dist = 1.5 * float(last_row['ATR'])
         qqq_sl = qqq_entry + risk_dist
-        qqq_tp = qqq_entry - (risk_dist * 1.5)
+        qqq_tp = qqq_entry - (risk_dist * 1.3)
 
     if setup_found:
         if has_traded_today():
@@ -157,7 +157,7 @@ def check_market_setup():
                    f"📊 *Direction:* {direction}\n"
                    f"💰 *Entry:* {us100_entry:.2f}\n"
                    f"🛑 *Stop Loss:* {us100_sl:.2f}\n"
-                   f"🎯 *Take Profit:* {us100_tp:.2f} (1.5R)\n"
+                   f"🎯 *Take Profit:* {us100_tp:.2f} (1.3R)\n"
                    f"💵 *Position Size:* {lot_size:.2f} lots (Risk: ${RISK_PER_TRADE_DOLLARS})\n\n"
                    f"⚠️ *Rule:* Max 1 trade today.")
         

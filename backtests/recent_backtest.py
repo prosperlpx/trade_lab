@@ -10,7 +10,7 @@ START_DATE = '2026-10-28'
 
 # Funding Pips $5K Account Risk Rules
 ACCOUNT_SIZE = 5000.0
-RISK_PER_TRADE_DOLLARS = 25.0      # 0.5% of account
+RISK_PER_TRADE_DOLLARS = 50.0      # 1% of account
 MAX_DAILY_LOSS_DOLLARS = 100.0     # 2% of account (Hard kill switch)
 
 def load_and_prepare_data():
@@ -100,7 +100,7 @@ def run_recent_backtest(df):
                     
                     risk_distance = 1.5 * row['ATR']
                     stop_loss = entry_price - risk_distance
-                    take_profit = entry_price + (risk_distance * 1.5)
+                    take_profit = entry_price + (risk_distance * 1.3)
                     position_size = RISK_PER_TRADE_DOLLARS / risk_distance
 
                 # VWAP PULLBACK SHORT: Price is below VWAP, but candle high spikes to touch VWAP
@@ -112,7 +112,7 @@ def run_recent_backtest(df):
                     
                     risk_distance = 1.5 * row['ATR']
                     stop_loss = entry_price + risk_distance
-                    take_profit = entry_price - (risk_distance * 1.5)
+                    take_profit = entry_price - (risk_distance * 1.3)
                     position_size = RISK_PER_TRADE_DOLLARS / risk_distance
             else:
                 pnl_points = 0.0
