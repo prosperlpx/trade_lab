@@ -15,4 +15,3 @@ logs/
 
 # Ignore local-only analysis, backtesting, and testing scripts
 # (GitHub Actions only needs live_monitor.py to run the cloud bot)
-backtests/
