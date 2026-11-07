@@ -15,10 +15,4 @@ logs/
 
 # Ignore local-only analysis, backtesting, and testing scripts
 # (GitHub Actions only needs live_monitor.py to run the cloud bot)
-strategies/recent_backtest.py
-strategies/data_downloader.py
-strategies/orb_backtest.py
-strategies/analyze_live_trades.py
-strategies/test_telegram.py
-strategies/verify_recent_trade.py
-strategies/vwap_backtest.pylogs/
+backtests/
