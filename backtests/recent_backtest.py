@@ -8,10 +8,14 @@ DATA_FILE = os.path.join(os.path.dirname(__file__), '..', 'data', 'us100_5m.csv'
 # 🎯 SET THIS TO THE DATE YOU WANT TO START TESTING FROM
 START_DATE = '2026-10-28'
 
-# Funding Pips $5K Account Risk Rules
-ACCOUNT_SIZE = 5000.0
-RISK_PER_TRADE_DOLLARS = 50.0      # 1% of account
-MAX_DAILY_LOSS_DOLLARS = 100.0     # 2% of account (Hard kill switch)
+# 🎯 SCALABLE RISK MANAGEMENT (SET FOR $10K ACCOUNT)
+ACCOUNT_SIZE = 10000.0               # Target: $10,000 Prop Firm Account
+RISK_PERCENTAGE = 0.01               # 1% Risk per trade = $100.00
+MAX_DAILY_LOSS_PERCENTAGE = 0.02     # 2% Max Daily Loss = $200.00 (Hard kill switch)
+
+# The bot calculates the exact dollars automatically based on ACCOUNT_SIZE
+RISK_PER_TRADE_DOLLARS = ACCOUNT_SIZE * RISK_PERCENTAGE
+MAX_DAILY_LOSS_DOLLARS = ACCOUNT_SIZE * MAX_DAILY_LOSS_PERCENTAGE
 
 def load_and_prepare_data():
     """Loads data, calculates daily VWAP/ATR, and filters for recent period"""
@@ -20,22 +24,12 @@ def load_and_prepare_data():
     
     print(f"⏳ Loading and preparing data (Filtering from {START_DATE} onwards)...")
     
-    # 1. Load CSV normally first
     df = pd.read_csv(DATA_FILE)
-    
-    # 2. Force pandas to parse the 'Datetime' column into real dates as UTC
-    # This prevents the 'Index object has no attribute tz_convert' error
     df['Datetime'] = pd.to_datetime(df['Datetime'], utc=True)
-    
-    # 3. Set it as the index
     df = df.set_index('Datetime')
-    
-    # 4. Convert UTC to WAT (Africa/Lagos)
     df.index = df.index.tz_convert('Africa/Lagos')
-    
     df = df.sort_index()
     
-    # Calculate Daily VWAP (Resets every day)
     df['Typical_Price'] = (df['High'] + df['Low'] + df['Close']) / 3.0
     df['TP_Vol'] = df['Typical_Price'] * df['Volume']
     daily_groups = df.groupby(df.index.date)
@@ -43,14 +37,12 @@ def load_and_prepare_data():
     df['Cumulative_Volume'] = daily_groups['Volume'].cumsum().replace(0, 1)
     df['VWAP'] = df['Cumulative_TP_Vol'] / df['Cumulative_Volume']
     
-    # Calculate ATR (14-period) for dynamic Stop Losses
     high_low = df['High'] - df['Low']
     high_close = np.abs(df['High'] - df['Close'].shift())
     low_close = np.abs(df['Low'] - df['Close'].shift())
     true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['ATR'] = true_range.rolling(14).mean()
     
-    # Filter dataframe to only process recent data (but keep enough history for ATR/VWAP to be valid)
     filter_date = pd.to_datetime(START_DATE).date() - pd.Timedelta(days=2)
     df_recent = df[df.index.date >= filter_date].copy()
     
@@ -64,7 +56,6 @@ def run_recent_backtest(df):
     trades = []
     
     for date, daily_df in df.groupby(df.index.date):
-        # Skip days before our target start date
         if str(date) < START_DATE:
             continue
             
@@ -80,7 +71,6 @@ def run_recent_backtest(df):
         trade_direction = 0
         entry_time = None
         
-        # Trading Window: 15:00 to 20:00 WAT (10 AM to 3 PM NY Time)
         trade_window = daily_df[(daily_df.index.hour >= 15) & (daily_df.index.hour < 20)]
         
         for index, row in trade_window.iterrows():
@@ -91,7 +81,7 @@ def run_recent_backtest(df):
                 continue
 
             if not in_trade:
-                # VWAP PULLBACK LONG: Price is above VWAP, but candle low dips to touch VWAP
+                # VWAP PULLBACK LONG
                 if row['Close'] > row['VWAP'] and row['Low'] <= row['VWAP'] * 1.001:
                     in_trade = True
                     entry_price = row['Close']
@@ -100,10 +90,10 @@ def run_recent_backtest(df):
                     
                     risk_distance = 1.5 * row['ATR']
                     stop_loss = entry_price - risk_distance
-                    take_profit = entry_price + (risk_distance * 1.3)
+                    take_profit = entry_price + (risk_distance * 1.3) # Strict 1.3R Target
                     position_size = RISK_PER_TRADE_DOLLARS / risk_distance
 
-                # VWAP PULLBACK SHORT: Price is below VWAP, but candle high spikes to touch VWAP
+                # VWAP PULLBACK SHORT
                 elif row['Close'] < row['VWAP'] and row['High'] >= row['VWAP'] * 0.999:
                     in_trade = True
                     entry_price = row['Close']
@@ -112,7 +102,7 @@ def run_recent_backtest(df):
                     
                     risk_distance = 1.5 * row['ATR']
                     stop_loss = entry_price + risk_distance
-                    take_profit = entry_price - (risk_distance * 1.3)
+                    take_profit = entry_price - (risk_distance * 1.3) # Strict 1.3R Target
                     position_size = RISK_PER_TRADE_DOLLARS / risk_distance
             else:
                 pnl_points = 0.0

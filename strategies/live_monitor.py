@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import os
 import urllib.request
-import json # Make sure json is imported
+import json
 from datetime import datetime
 import pytz
 
@@ -11,13 +11,19 @@ import pytz
 BOT_TOKEN = os.environ.get('BOT_TOKEN', 'YOUR_FALLBACK_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID', 'YOUR_FALLBACK_CHAT_ID')
 
-ACCOUNT_SIZE = 5000.0
-RISK_PER_TRADE_DOLLARS = 50.0
-MAX_DAILY_LOSS_DOLLARS = 100.0
+# 🎯 SCALABLE RISK MANAGEMENT (SET FOR $10K ACCOUNT)
+ACCOUNT_SIZE = 10000.0               # Target: $10,000 Prop Firm Account
+RISK_PERCENTAGE = 0.01               # 1% Risk per trade = $100.00
+MAX_DAILY_LOSS_PERCENTAGE = 0.02     # 2% Max Daily Loss = $200.00 (Hard kill switch)
+
+# The bot calculates the exact dollars automatically based on ACCOUNT_SIZE
+RISK_PER_TRADE_DOLLARS = ACCOUNT_SIZE * RISK_PERCENTAGE
+MAX_DAILY_LOSS_DOLLARS = ACCOUNT_SIZE * MAX_DAILY_LOSS_PERCENTAGE
+
 POINT_VALUE_PER_LOT = 10.0
 WAT_TZ = pytz.timezone('Africa/Lagos')
 
-# UPDATED: We now use a JSON file for state management
+# JSON State Management (Points to root logs folder)
 LOG_DIR = os.path.join(os.path.dirname(__file__), '..', 'logs')
 os.makedirs(LOG_DIR, exist_ok=True)
 STATE_FILE = os.path.join(LOG_DIR, 'state.json')
@@ -36,43 +42,36 @@ def get_online_wat_time():
     except Exception:
         return datetime.now(WAT_TZ)
 
-# --- NEW JSON MEMORY FUNCTIONS ---
+# --- JSON MEMORY FUNCTIONS ---
 def load_state():
-    """Loads the JSON state file. Creates a default one if it doesn't exist."""
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, 'r') as f:
             return json.load(f)
     else:
-        # Default state if the file doesn't exist yet
         return {"traded_dates": [], "last_alert": None}
 
 def save_state(state_data):
-    """Saves the dictionary to the JSON file."""
     with open(STATE_FILE, 'w') as f:
         json.dump(state_data, f, indent=2)
 
 def has_traded_today():
-    """Checks the JSON state to see if we already alerted today."""
     state = load_state()
     today_str = get_online_wat_time().strftime('%Y-%m-%d')
     return today_str in state["traded_dates"]
 
 def log_trade_today(direction, entry_price):
-    """Updates the JSON state with today's date and trade details."""
     state = load_state()
     today_str = get_online_wat_time().strftime('%Y-%m-%d')
     
     if today_str not in state["traded_dates"]:
         state["traded_dates"].append(today_str)
         
-    # Save extra details for future-proofing!
     state["last_alert"] = {
         "date": today_str,
         "time": get_online_wat_time().strftime('%H:%M'),
         "direction": direction,
         "entry": entry_price
     }
-    
     save_state(state)
 
 def send_telegram_alert(message):
@@ -129,18 +128,21 @@ def check_market_setup():
     direction = ""
     qqq_entry, qqq_sl, qqq_tp = 0.0, 0.0, 0.0
 
+    # LONG Setup
     if last_row['Close'] > last_row['VWAP'] and last_row['Low'] <= last_row['VWAP'] * 1.001:
         setup_found, direction = True, "🟢 LONG"
         qqq_entry = float(last_row['Close'])
         risk_dist = 1.5 * float(last_row['ATR'])
         qqq_sl = qqq_entry - risk_dist
-        qqq_tp = qqq_entry + (risk_dist * 1.3)
+        qqq_tp = qqq_entry + (risk_dist * 1.3) # Strict 1.3R Target
+        
+    # SHORT Setup
     elif last_row['Close'] < last_row['VWAP'] and last_row['High'] >= last_row['VWAP'] * 0.999:
         setup_found, direction = True, "🔴 SHORT"
         qqq_entry = float(last_row['Close'])
         risk_dist = 1.5 * float(last_row['ATR'])
         qqq_sl = qqq_entry + risk_dist
-        qqq_tp = qqq_entry - (risk_dist * 1.3)
+        qqq_tp = qqq_entry - (risk_dist * 1.3) # Strict 1.3R Target
 
     if setup_found:
         if has_traded_today():
@@ -158,13 +160,11 @@ def check_market_setup():
                    f"💰 *Entry:* {us100_entry:.2f}\n"
                    f"🛑 *Stop Loss:* {us100_sl:.2f}\n"
                    f"🎯 *Take Profit:* {us100_tp:.2f} (1.3R)\n"
-                   f"💵 *Position Size:* {lot_size:.2f} lots (Risk: ${RISK_PER_TRADE_DOLLARS})\n\n"
+                   f"💵 *Position Size:* {lot_size:.2f} lots (Risk: ${RISK_PER_TRADE_DOLLARS:.2f})\n\n"
                    f"⚠️ *Rule:* Max 1 trade today.")
         
         print("   -> 🚨 SETUP CONFIRMED! Sending Telegram alert...")
         send_telegram_alert(message)
-        
-        # Save to JSON State
         log_trade_today(direction, us100_entry)
     else:
         print("   -> No setup detected. Waiting...")
