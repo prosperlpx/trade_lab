@@ -40,9 +40,10 @@ jobs:
 
       # --- NEW: UPLOAD CLOUD MEMORY ---
       - name: Upload updated trade state
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: trade-state
           path: ./state.json
-          retention-days: 1 # We only need to remember today's trades
+          retention-days: 7 # We only need to remember today's trades
           if-no-files-found: ignore
