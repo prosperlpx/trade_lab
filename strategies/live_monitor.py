@@ -26,7 +26,10 @@ WAT_TZ = pytz.timezone('Africa/Lagos')
 # JSON State Management (Points to root logs folder)
 LOG_DIR = os.path.join(os.path.dirname(__file__), '..', 'logs')
 os.makedirs(LOG_DIR, exist_ok=True)
-STATE_FILE = os.path.join(LOG_DIR, 'state.json')
+
+#STATE_FILE must be in ROOT to match YAML
+Base_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+STATE_FILE = os.path.join(BASE_DIR, 'state.json')
 
 def get_online_wat_time():
     try:
