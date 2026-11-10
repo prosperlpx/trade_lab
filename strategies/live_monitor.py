@@ -103,13 +103,17 @@ def check_market_setup():
         print(f"   -> Network error: {e}")
         return
 
-    if qqq_df.empty or nq_df.empty: return
+    if qqq_df.empty or nq_df.empty: 
+        prinf(f"-> Yahoo returned empty: QQQ empty? {qqq_df.empty}, NQ empty? {nq_df.empty} . Waiting for next run...")
+        return
     if isinstance(qqq_df.columns, pd.MultiIndex): qqq_df.columns = qqq_df.columns.get_level_values(0)
     if isinstance(nq_df.columns, pd.MultiIndex): nq_df.columns = nq_df.columns.get_level_values(0)
 
     latest_qqq = float(qqq_df['Close'].iloc[-1])
     latest_nq = float(nq_df['Close'].iloc[-1])
-    if latest_qqq == 0: return
+    if latest_qqq == 0: 
+        print(f"-> QQQ price is 0, bad data. Waiting...")
+        return
     conversion_factor = latest_nq / latest_qqq
 
     qqq_df['Typical_Price'] = (qqq_df['High'] + qqq_df['Low'] + qqq_df['Close']) / 3.0
