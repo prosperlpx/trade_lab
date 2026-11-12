@@ -1,18 +1,18 @@
-# Virtual Environment
-venv/
-
-# Python cache
-__pycache__/
-*.pyc
-
-# Environment variables / Secrets (for future API keys)
+# Environment variables
 .env
+.env.local
 
-# Data files (too large for GitHub)
-data/*.csv
-logs/*.log
+# Logs and Local State (NEVER commit these)
 logs/
+*.json
+*.db
 
-# Ignore local-only analysis, backtesting, and testing scripts
-# (GitHub Actions only needs live_monitor.py to run the cloud bot)
-!data/recent_backtest_results.csv
+# Data files (NEVER commit these)
+data/
+*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+env/
