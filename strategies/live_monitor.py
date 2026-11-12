@@ -104,7 +104,7 @@ def check_market_setup():
         return
 
     if qqq_df.empty or nq_df.empty: 
-        prinf(f"-> Yahoo returned empty: QQQ empty? {qqq_df.empty}, NQ empty? {nq_df.empty} . Waiting for next run...")
+        print(f"-> Yahoo returned empty: QQQ empty? {qqq_df.empty}, NQ empty? {nq_df.empty} . Waiting for next run...")
         return
     if isinstance(qqq_df.columns, pd.MultiIndex): qqq_df.columns = qqq_df.columns.get_level_values(0)
     if isinstance(nq_df.columns, pd.MultiIndex): nq_df.columns = nq_df.columns.get_level_values(0)
