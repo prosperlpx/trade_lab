@@ -1,5 +1,4 @@
 import yfinance as yf
-import pandas as pd
 
 # --- THE ALERT DETAILS WE ARE VERIFYING ---
 ENTRY_PRICE = 686.36
@@ -8,7 +7,7 @@ TAKE_PROFIT = 688.38
 DIRECTION = "LONG"
 POSITION_SIZE = 18.58 # From your bot's calculation
 
-print(f"⏳ Fetching recent 5-minute data for QQQ to verify the trade...")
+print("⏳ Fetching recent 5-minute data for QQQ to verify the trade...")
 
 # Fetch the last 5 days of 5-minute data to ensure we catch the setup
 ticker = yf.Ticker("QQQ")
@@ -25,14 +24,20 @@ else:
     close_matches = df[df['Price_Diff'] < 1.0].copy()
     
     if close_matches.empty:
-        print("❌ Could not find a matching candle near the entry price of 686.36 in the last 5 days.")
+        print(
+            "❌ Could not find a matching candle near the entry price of 686.36 "
+            "in the last 5 days."
+        )
     else:
         # Get the closest match
         closest_match = close_matches.sort_values('Price_Diff').iloc[0]
         entry_idx = df.index.get_loc(closest_match.name)
         
         print(f"\n🔍 Found matching setup candle at: {closest_match.name}")
-        print(f"   Entry: {closest_match['Close']:.2f} | Low: {closest_match['Low']:.2f} | High: {closest_match['High']:.2f}")
+        print(
+            f"   Entry: {closest_match['Close']:.2f} | "
+            f"Low: {closest_match['Low']:.2f} | High: {closest_match['High']:.2f}"
+        )
         
         # Slice the data from that exact candle onwards to simulate the trade forward
         trade_data = df.iloc[entry_idx:].copy()
@@ -41,7 +46,7 @@ else:
         hit_sl = False
         exit_reason = "Still Open / Incomplete Data"
         
-        for index, row in trade_data.iterrows():
+        for _, row in trade_data.iterrows():
             if DIRECTION == "LONG":
                 # Check Stop Loss first (did the intraday low hit it?)
                 if row['Low'] <= STOP_LOSS:

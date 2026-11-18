@@ -2,13 +2,15 @@
 .env
 .env.local
 
-# Logs and Local State (NEVER commit these)
+# Runtime state and logs (never commit)
+.state/
+/state.json
 logs/
-*.json
 *.db
 
-# Data files (NEVER commit these)
+# Market data and backtest output (never commit)
 data/
+results/
 *.csv
 
 # Python
@@ -16,3 +18,7 @@ __pycache__/
 *.py[cod]
 venv/
 env/
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
