@@ -1,7 +1,8 @@
-import yfinance as yf
-import pandas as pd
 import os
 import warnings
+
+import pandas as pd
+import yfinance as yf
 
 # Suppress noisy warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -26,7 +27,10 @@ def download_us100_data():
         df = yf.download(TICKER, period=PERIOD, interval=TIMEFRAME, progress=False)
         
         if df is None or df.empty:
-            print("❌ Error: No data downloaded. Yahoo Finance may be rate-limiting. Try again in 10 minutes.")
+            print(
+                "❌ Error: No data downloaded. Yahoo Finance may be rate-limiting. "
+                "Try again in 10 minutes."
+            )
             return
             
         # Clean up MultiIndex columns if yfinance adds them

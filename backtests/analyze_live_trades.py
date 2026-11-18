@@ -1,6 +1,4 @@
-import pandas as pd
 import os
-from datetime import datetime
 
 # --- CONFIGURATION ---
 LOG_DIR = os.path.join(os.path.dirname(__file__), '..', 'logs')
@@ -12,14 +10,13 @@ def analyze_live_performance():
     # 1. Check Traded Dates Log
     traded_days = []
     if os.path.exists(TRADED_DATES_FILE):
-        with open(TRADED_DATES_FILE, 'r') as f:
+        with open(TRADED_DATES_FILE) as f:
             traded_days = [line.strip() for line in f.readlines() if line.strip()]
     
     total_alerts_sent = len(traded_days)
     print(f"✅ Total Alerts Sent by Bot: {total_alerts_sent}") # Fixed! 
     
     # 2. Calculate Expected vs Actual Trading Days
-    today = datetime.now().strftime('%Y-%m-%d')
     unique_days = set(traded_days)
     print(f"📅 Unique Trading Days Active: {len(unique_days)}")
     

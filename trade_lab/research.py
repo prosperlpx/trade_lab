@@ -1,0 +1,651 @@
+"""Chronological strategy research with instrument-specific execution assumptions.
+
+Variants are ranked on validation intervals. Their selected configurations are
+then evaluated on subsequent test intervals, which do not participate in selection.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass
+from datetime import date
+
+import pandas as pd
+
+from .backtest import BacktestCosts, performance_summary, run_backtest
+from .config import AccountRiskConfig, StrategyConfig, StrategyParameters
+from .instruments import InstrumentSpec
+from .robustness import block_bootstrap_summary, cost_scenarios, rejection_reasons
+from .sessions import NY, in_window
+from .strategy import Signal, signal_for_bar
+
+
+@dataclass(frozen=True)
+class ResearchVariant:
+    """Named strategy configuration included in a research universe."""
+    name: str
+    config: StrategyParameters
+
+    sensitivity_group: str = "default"
+
+    def __post_init__(self) -> None:
+        if not self.name.strip():
+            raise ValueError("variant name cannot be empty")
+        if not self.sensitivity_group.strip():
+            raise ValueError("sensitivity_group cannot be empty")
+
+
+@dataclass(frozen=True)
+class WalkForwardWindow:
+    """Chronological date ranges; boundaries are inclusive."""
+    train_start: date
+    train_end: date
+    validation_start: date
+    validation_end: date
+    test_start: date
+    test_end: date
+
+
+def make_walk_forward_windows(
+    trading_dates: list[date],
+    train_days: int,
+    validation_days: int,
+    test_days: int,
+    step_days: int | None = None,
+) -> list[WalkForwardWindow]:
+    """Create expanding-history, rolling-forward windows over observed sessions."""
+    sizes = (train_days, validation_days, test_days)
+    if any(isinstance(n, bool) or not isinstance(n, int) or n < 1 for n in sizes):
+        raise ValueError("train_days, validation_days and test_days must be positive integers")
+    step = test_days if step_days is None else step_days
+    if isinstance(step, bool) or not isinstance(step, int) or step < 1:
+        raise ValueError("step_days must be a positive integer")
+    dates = sorted(set(trading_dates))
+    windows: list[WalkForwardWindow] = []
+    first_test = train_days + validation_days
+    for test_start in range(first_test, len(dates) - test_days + 1, step):
+        windows.append(
+            WalkForwardWindow(
+                train_start=dates[0],
+                train_end=dates[test_start - validation_days - 1],
+                validation_start=dates[test_start - validation_days],
+                validation_end=dates[test_start - 1],
+                test_start=dates[test_start],
+                test_end=dates[test_start + test_days - 1],
+            )
+        )
+    return windows
+
+
+def _summary_for_range(
+    trades: pd.DataFrame, start: date, end: date
+) -> dict[str, float | int]:
+    if trades.empty:
+        selected = trades
+    else:
+        selected = trades.loc[trades["Date"].map(date.fromisoformat).between(start, end)]
+    return performance_summary(selected)
+
+
+def _config_fingerprint(config: StrategyParameters) -> str:
+    canonical = json.dumps(asdict(config), sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _selection_key(summary: Mapping[str, float | int]) -> tuple[float, float, int]:
+    expectancy = float(summary["expectancy_r"])
+    profit_factor = float(summary["profit_factor"])
+    if not math.isfinite(profit_factor):
+        profit_factor = 1_000_000.0
+    return expectancy, profit_factor, int(summary["closed"])
+
+
+def run_walk_forward_research(
+    datasets: Mapping[str, pd.DataFrame],
+    instruments: Mapping[str, InstrumentSpec],
+    costs: Mapping[str, BacktestCosts],
+    variants: list[ResearchVariant],
+    *,
+    train_days: int,
+    validation_days: int,
+    test_days: int,
+    step_days: int | None = None,
+    value_to_account_rates: Mapping[str, float] | None = None,
+    risk: AccountRiskConfig | None = None,
+    data_sources: Mapping[str, str],
+    final_holdout_days: int = 0,
+    minimum_validation_trades: int = 30,
+    minimum_test_trades: int = 30,
+    confidence_level: float = 0.95,
+    bootstrap_samples: int = 2000,
+    bootstrap_block_length: int = 5,
+    cost_stress_multipliers: tuple[float, ...] = (1.0, 1.5, 2.0),
+) -> pd.DataFrame:
+    """Evaluate symbols on shared calendar windows and explicit per-symbol costs.
+
+    The intersection of observed New York sessions is used for every symbol,
+    keeping cross-instrument train/validation/test date boundaries aligned.
+    Each base symbol/variant backtest is computed once and reused across windows;
+    additional backtests apply the declared transaction-cost stress scenarios.
+    Variants are ranked on Bonferroni-adjusted block-bootstrap validation bounds.
+    Test data never participates in selection. Full history is passed to preserve
+    indicator warm-up.
+    """
+    if not datasets:
+        raise ValueError("at least one dataset is required")
+    if not variants:
+        raise ValueError("at least one research variant is required")
+    if len({variant.name for variant in variants}) != len(variants):
+        raise ValueError("research variant names must be unique")
+    if (
+        isinstance(final_holdout_days, bool)
+        or not isinstance(final_holdout_days, int)
+        or final_holdout_days < 0
+    ):
+        raise ValueError("final_holdout_days must be a non-negative integer")
+    for label, value in (
+        ("minimum_validation_trades", minimum_validation_trades),
+        ("minimum_test_trades", minimum_test_trades),
+        ("bootstrap_samples", bootstrap_samples),
+        ("bootstrap_block_length", bootstrap_block_length),
+    ):
+        minimum = 200 if label == "bootstrap_samples" else 1
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise ValueError(f"{label} must be an integer >= {minimum}")
+    if not 0 < confidence_level < 1:
+        raise ValueError("confidence_level must be between 0 and 1")
+
+    rates = value_to_account_rates or {}
+    sources = data_sources
+    sessions_by_symbol: dict[str, set[date]] = {}
+    for symbol, bars in datasets.items():
+        if symbol not in instruments or symbol not in costs:
+            raise ValueError(f"{symbol} requires explicit instrument economics and costs")
+        if instruments[symbol].symbol != symbol:
+            instrument_symbol = instruments[symbol].symbol
+            raise ValueError(
+                f"instrument key {symbol!r} does not match {instrument_symbol!r}"
+            )
+        if bars.empty or not isinstance(bars.index, pd.DatetimeIndex) or bars.index.tz is None:
+            raise ValueError(f"{symbol} requires non-empty timezone-aware bars")
+        if bars.index.has_duplicates or not bars.index.is_monotonic_increasing:
+            raise ValueError(f"{symbol} bars must be sorted with unique timestamps")
+        if symbol not in sources or not sources[symbol].strip():
+            raise ValueError(f"{symbol} requires an explicit data source description")
+        sessions_by_symbol[symbol] = set(bars.index.tz_convert(NY).date)
+
+    common_sessions = sorted(set.intersection(*sessions_by_symbol.values()))
+    if final_holdout_days >= len(common_sessions) and final_holdout_days:
+        raise ValueError("final holdout must leave at least one development session")
+    holdout_sessions = (
+        common_sessions[-final_holdout_days:] if final_holdout_days else []
+    )
+    development_sessions = (
+        common_sessions[:-final_holdout_days] if final_holdout_days else common_sessions
+    )
+    windows = make_walk_forward_windows(
+        development_sessions, train_days, validation_days, test_days, step_days
+    )
+    if not windows:
+        raise ValueError(
+            f"only {len(common_sessions)} common New York sessions; "
+            "insufficient for requested walk-forward windows"
+        )
+
+    validation_sessions = {
+        session
+        for window in windows
+        for session in common_sessions
+        if window.validation_start <= session <= window.validation_end
+    }
+    output: list[dict[str, object]] = []
+    for symbol, bars in datasets.items():
+        instrument = instruments[symbol]
+        execution_costs = costs[symbol]
+        cost_scenarios(execution_costs, cost_stress_multipliers)
+        trades_by_variant: dict[str, pd.DataFrame] = {}
+        stress_trades_by_variant: dict[str, dict[float, pd.DataFrame]] = {}
+        metadata_by_variant: dict[str, dict[str, object]] = {}
+
+        for variant in variants:
+            trades_by_variant[variant.name] = run_backtest(
+                bars,
+                variant.config,
+                costs=execution_costs,
+                instrument=instrument,
+                value_to_account_rate=rates.get(symbol, 1.0),
+                risk=risk,
+            )
+            stress_trades_by_variant[variant.name] = {
+                multiplier: (
+                    trades_by_variant[variant.name]
+                    if multiplier == 1.0
+                    else run_backtest(
+                        bars,
+                        variant.config,
+                        costs=stressed_costs,
+                        instrument=instrument,
+                        value_to_account_rate=rates.get(symbol, 1.0),
+                        risk=risk,
+                    )
+                )
+                for multiplier, stressed_costs in cost_scenarios(
+                    execution_costs, cost_stress_multipliers
+                )
+            }
+            variant_risk = risk or (
+                AccountRiskConfig(
+                    variant.config.account_size,
+                    variant.config.risk_pct,
+                    variant.config.max_daily_loss_pct,
+                )
+                if isinstance(variant.config, StrategyConfig)
+                else AccountRiskConfig()
+            )
+            metadata_by_variant[variant.name] = {
+                "config_hash": _config_fingerprint(variant.config),
+                "data_source": sources[symbol],
+                "data_hash": hashlib.sha256(
+                    (
+                        "|".join(map(str, bars.columns))
+                        + pd.util.hash_pandas_object(bars, index=True).values.tobytes().hex()
+                    ).encode("utf-8")
+                ).hexdigest(),
+                "data_start": bars.index[0].isoformat(),
+                "data_end": bars.index[-1].isoformat(),
+                "data_bars": len(bars),
+                "instrument_tick_size": instrument.tick_size,
+                "instrument_tick_value": instrument.tick_value,
+                "instrument_tick_value_currency": instrument.tick_value_currency,
+                "instrument_quantity_unit": instrument.quantity_unit,
+                "instrument_min_quantity": instrument.min_quantity,
+                "instrument_quantity_step": instrument.quantity_step,
+                "instrument_max_quantity": instrument.max_quantity,
+                "spread_points": execution_costs.spread_points,
+                "slippage_points": execution_costs.slippage_points,
+                "commission_per_unit": execution_costs.commission_per_unit,
+                "value_to_account_rate": rates.get(symbol, 1.0),
+                "account_size": variant_risk.account_size,
+                "risk_pct": variant_risk.risk_pct,
+                "max_daily_loss_pct": variant_risk.max_daily_loss_pct,
+            }
+
+        for window_number, window in enumerate(windows, start=1):
+            evaluated = []
+            for variant in variants:
+                trades = trades_by_variant[variant.name]
+                train = _summary_for_range(trades, window.train_start, window.train_end)
+                validation = _summary_for_range(
+                    trades, window.validation_start, window.validation_end
+                )
+                validation_stats = block_bootstrap_summary(
+                    trades.loc[
+                        trades["Date"].map(date.fromisoformat).between(
+                            window.validation_start, window.validation_end
+                        )
+                    ] if not trades.empty else trades,
+                    confidence_level=confidence_level,
+                    bootstrap_samples=bootstrap_samples,
+                    block_length=bootstrap_block_length,
+                    family_size=len(variants),
+                    seed=1729 + window_number,
+                )
+                evaluated.append((variant, validation, validation_stats))
+                group_variants = [
+                    item for item in variants
+                    if item.sensitivity_group == variant.sensitivity_group
+                ]
+                group_expectancies = [
+                    _summary_for_range(
+                        trades_by_variant[item.name],
+                        window.validation_start,
+                        window.validation_end,
+                    )["expectancy_r"]
+                    for item in group_variants
+                ]
+                output.append({
+                    "symbol": symbol,
+                    "window": window_number,
+                    "variant": variant.name,
+                    "role": "candidate",
+                    "sensitivity_group": variant.sensitivity_group,
+                    "sensitivity_variant_count": len(group_variants),
+                    "sensitivity_expectancy_min": min(group_expectancies),
+                    "sensitivity_expectancy_median": float(pd.Series(group_expectancies).median()),
+                    "sensitivity_expectancy_max": max(group_expectancies),
+                    "sensitivity_positive_variant_share": float(
+                        sum(value > 0 for value in group_expectancies) / len(group_expectancies)
+                    ),
+                    "validation_minimum_trades": minimum_validation_trades,
+                    "multiple_testing_family_size": len(variants),
+                    **metadata_by_variant[variant.name],
+                    "train_start": window.train_start.isoformat(),
+                    "train_end": window.train_end.isoformat(),
+                    "validation_start": window.validation_start.isoformat(),
+                    "validation_end": window.validation_end.isoformat(),
+                    "test_start": window.test_start.isoformat(),
+                    "test_end": window.test_end.isoformat(),
+                    **{f"train_{key}": value for key, value in train.items()},
+                    **{f"validation_{key}": value for key, value in validation.items()},
+                    **{f"validation_{key}": value for key, value in validation_stats.items()},
+                })
+
+            selected_variant, _, selected_validation_stats = max(
+                evaluated,
+                key=lambda item: (
+                    float(item[2]["adjusted_expectancy_ci_low"])
+                    if math.isfinite(float(item[2]["adjusted_expectancy_ci_low"]))
+                    else -math.inf,
+                    _selection_key(item[1]),
+                ),
+            )
+            selected_trades = trades_by_variant[selected_variant.name]
+            test_trades = (
+                selected_trades.loc[
+                    selected_trades["Date"].map(date.fromisoformat).between(
+                        window.test_start, window.test_end
+                    )
+                ] if not selected_trades.empty else selected_trades
+            )
+            test = _summary_for_range(selected_trades, window.test_start, window.test_end)
+            test_stats = block_bootstrap_summary(
+                test_trades, confidence_level=confidence_level,
+                bootstrap_samples=bootstrap_samples, block_length=bootstrap_block_length,
+                family_size=1, seed=2729 + window_number,
+            )
+            validation_reasons = rejection_reasons(
+                selected_validation_stats, minimum_trades=minimum_validation_trades
+            )
+            test_reasons = rejection_reasons(
+                test_stats, minimum_trades=minimum_test_trades
+            )
+            reasons = [
+                *(f"VALIDATION_{reason}" for reason in validation_reasons),
+                *(f"TEST_{reason}" for reason in test_reasons),
+            ]
+            stress_metrics: dict[str, object] = {}
+            max_multiplier = max(cost_stress_multipliers)
+            max_stress_stats: dict[str, float | int] = {}
+            for multiplier, stress_trades in stress_trades_by_variant[
+                selected_variant.name
+            ].items():
+                scoped = (
+                    stress_trades.loc[
+                        stress_trades["Date"].map(date.fromisoformat).between(
+                            window.test_start, window.test_end
+                        )
+                    ] if not stress_trades.empty else stress_trades
+                )
+                stress_summary = _summary_for_range(
+                    stress_trades, window.test_start, window.test_end
+                )
+                stress_stats = block_bootstrap_summary(
+                    scoped, confidence_level=confidence_level,
+                    bootstrap_samples=bootstrap_samples,
+                    block_length=bootstrap_block_length,
+                    family_size=1, seed=3729 + window_number + int(multiplier * 100),
+                )
+                stress_metrics.update({
+                    f"test_cost_{multiplier:g}x_expectancy_r": stress_summary["expectancy_r"],
+                    f"test_cost_{multiplier:g}x_adjusted_ci_low": (
+                        stress_stats["adjusted_expectancy_ci_low"]
+                    ),
+                    f"test_cost_{multiplier:g}x_closed": stress_stats["sample_trades"],
+                })
+                if multiplier == max_multiplier:
+                    max_stress_stats = stress_stats
+            if int(max_stress_stats.get("sample_trades", 0)) < minimum_test_trades or (
+                not math.isfinite(
+                    float(
+                        max_stress_stats.get(
+                            "adjusted_expectancy_ci_low", float("nan")
+                        )
+                    )
+                )
+                or float(max_stress_stats["adjusted_expectancy_ci_low"]) <= 0
+            ):
+                reasons.append("COST_STRESS_FAILURE")
+            output.append({
+                "symbol": symbol,
+                "window": window_number,
+                "variant": selected_variant.name,
+                "role": "selected_test",
+                "decision": "ACCEPT" if not reasons else "REJECT",
+                "rejection_reasons": ";".join(reasons),
+                "selected_on": "validation_bonferroni_adjusted_block_bootstrap_lower_bound",
+                "validation_adjusted_ci_low": (
+                    selected_validation_stats["adjusted_expectancy_ci_low"]
+                ),
+                "minimum_test_trades": minimum_test_trades,
+                "cost_stress_max_multiplier": max_multiplier,
+                **metadata_by_variant[selected_variant.name],
+                "train_start": window.train_start.isoformat(),
+                "train_end": window.train_end.isoformat(),
+                "validation_start": window.validation_start.isoformat(),
+                "validation_end": window.validation_end.isoformat(),
+                "test_start": window.test_start.isoformat(),
+                "test_end": window.test_end.isoformat(),
+                **{f"test_{key}": value for key, value in test.items()},
+                **{f"test_{key}": value for key, value in test_stats.items()},
+                **stress_metrics,
+            })
+
+        if holdout_sessions:
+            aggregate = []
+            for variant in variants:
+                trades = trades_by_variant[variant.name]
+                validation_trades = (
+                    trades.loc[
+                        trades["Date"].map(date.fromisoformat).isin(validation_sessions)
+                    ] if not trades.empty else trades
+                )
+                stats = block_bootstrap_summary(
+                    validation_trades, confidence_level=confidence_level,
+                    bootstrap_samples=bootstrap_samples,
+                    block_length=bootstrap_block_length,
+                    family_size=len(variants), seed=4729,
+                )
+                aggregate.append((variant, performance_summary(validation_trades), stats))
+            if aggregate:
+                final_variant, _, final_validation_stats = max(
+                    aggregate,
+                    key=lambda item: (
+                        float(item[2]["adjusted_expectancy_ci_low"])
+                        if math.isfinite(float(item[2]["adjusted_expectancy_ci_low"]))
+                        else -math.inf,
+                        _selection_key(item[1]),
+                    ),
+                )
+                holdout = _summary_for_range(
+                    trades_by_variant[final_variant.name],
+                    holdout_sessions[0], holdout_sessions[-1],
+                )
+                holdout_trades = trades_by_variant[final_variant.name]
+                holdout_trades = (
+                    holdout_trades.loc[
+                        holdout_trades["Date"].map(date.fromisoformat).between(
+                            holdout_sessions[0], holdout_sessions[-1]
+                        )
+                    ] if not holdout_trades.empty else holdout_trades
+                )
+                holdout_stats = block_bootstrap_summary(
+                    holdout_trades, confidence_level=confidence_level,
+                    bootstrap_samples=bootstrap_samples,
+                    block_length=bootstrap_block_length, family_size=1, seed=5729,
+                )
+                validation_reasons = rejection_reasons(
+                    final_validation_stats, minimum_trades=minimum_validation_trades
+                )
+                holdout_reasons = rejection_reasons(
+                    holdout_stats, minimum_trades=minimum_test_trades
+                )
+                holdout_reasons = [
+                    *(f"VALIDATION_{reason}" for reason in validation_reasons),
+                    *(f"HOLDOUT_{reason}" for reason in holdout_reasons),
+                ]
+                holdout_stress_metrics: dict[str, object] = {}
+                maximum_holdout_stress: dict[str, float | int] = {}
+                for multiplier, stress_trades in stress_trades_by_variant[
+                    final_variant.name
+                ].items():
+                    scoped_stress = (
+                        stress_trades.loc[
+                            stress_trades["Date"].map(date.fromisoformat).between(
+                                holdout_sessions[0], holdout_sessions[-1]
+                            )
+                        ] if not stress_trades.empty else stress_trades
+                    )
+                    stress_stats = block_bootstrap_summary(
+                        scoped_stress, confidence_level=confidence_level,
+                        bootstrap_samples=bootstrap_samples,
+                        block_length=bootstrap_block_length, family_size=1,
+                        seed=6729 + int(multiplier * 100),
+                    )
+                    stress_summary = _summary_for_range(
+                        stress_trades, holdout_sessions[0], holdout_sessions[-1]
+                    )
+                    holdout_stress_metrics.update({
+                        f"holdout_cost_{multiplier:g}x_expectancy_r": (
+                            stress_summary["expectancy_r"]
+                        ),
+                        f"holdout_cost_{multiplier:g}x_adjusted_ci_low": (
+                            stress_stats["adjusted_expectancy_ci_low"]
+                        ),
+                        f"holdout_cost_{multiplier:g}x_closed": stress_stats["sample_trades"],
+                    })
+                    if multiplier == max(cost_stress_multipliers):
+                        maximum_holdout_stress = stress_stats
+                if int(maximum_holdout_stress.get("sample_trades", 0)) < minimum_test_trades or (
+                    not math.isfinite(
+                        float(
+                            maximum_holdout_stress.get(
+                                "adjusted_expectancy_ci_low", float("nan")
+                            )
+                        )
+                    )
+                    or float(maximum_holdout_stress["adjusted_expectancy_ci_low"]) <= 0
+                ):
+                    holdout_reasons.append("COST_STRESS_FAILURE")
+                output.append({
+                    "symbol": symbol, "window": "final", "variant": final_variant.name,
+                    "role": "final_holdout",
+                    "decision": "ACCEPT" if not holdout_reasons else "REJECT",
+                    "rejection_reasons": ";".join(holdout_reasons),
+                    "selected_on": (
+                        "aggregate_validation_bonferroni_adjusted_block_bootstrap_lower_bound"
+                    ),
+                    "validation_adjusted_ci_low": (
+                        final_validation_stats["adjusted_expectancy_ci_low"]
+                    ),
+                    **metadata_by_variant[final_variant.name],
+                    "validation_sessions_used": len(validation_sessions),
+                    "holdout_start": holdout_sessions[0].isoformat(),
+                    "holdout_end": holdout_sessions[-1].isoformat(),
+                    **{f"holdout_{key}": value for key, value in holdout.items()},
+                    **{f"holdout_{key}": value for key, value in holdout_stats.items()},
+                    **holdout_stress_metrics,
+                })
+            else:
+                output.append({
+                    "symbol": symbol, "window": "final", "variant": "",
+                    "role": "final_holdout_rejected", "decision": "REJECT",
+                    "rejection_reasons": "INSUFFICIENT_VALIDATION_TRADES",
+                    "minimum_validation_trades": minimum_validation_trades,
+                    "validation_sessions_used": len(validation_sessions),
+                    "holdout_start": holdout_sessions[0].isoformat(),
+                    "holdout_end": holdout_sessions[-1].isoformat(),
+                })
+    return pd.DataFrame(output)
+
+
+def measure_reclaim_outcomes(
+    prepared: pd.DataFrame,
+    config: StrategyParameters,
+    horizons_bars: tuple[int, ...] = (3, 6, 12),
+) -> pd.DataFrame:
+    """Measure forward excursion after every qualifying reclaim candidate.
+
+    Outcomes are normalized by the signal's initial stop distance (R). Only
+    complete horizons contained within the same New York session date are
+    included. This is a descriptive label study, not a trade simulation.
+    """
+    if not horizons_bars or any(
+        isinstance(horizon, bool) or not isinstance(horizon, int) or horizon < 1
+        for horizon in horizons_bars
+    ):
+        raise ValueError("horizons_bars must contain positive integers")
+    if len(set(horizons_bars)) != len(horizons_bars):
+        raise ValueError("horizons_bars must not contain duplicates")
+    if not isinstance(prepared.index, pd.DatetimeIndex) or prepared.index.tz is None:
+        raise ValueError("prepared bars require a timezone-aware DatetimeIndex")
+    if prepared.index.has_duplicates or not prepared.index.is_monotonic_increasing:
+        raise ValueError("prepared bars must be sorted with unique timestamps")
+
+    ny_dates = prepared.index.tz_convert(NY).date
+    rows: list[dict[str, object]] = []
+    for position, (stamp, bar) in enumerate(prepared.iterrows()):
+        if not in_window(stamp, config):
+            continue
+        signal: Signal | None = signal_for_bar(stamp, bar, config)
+        if signal is None:
+            continue
+        for horizon in horizons_bars:
+            end_position = position + horizon
+            if end_position >= len(prepared):
+                continue
+            if ny_dates[end_position] != ny_dates[position]:
+                continue
+            future = prepared.iloc[position + 1 : end_position + 1]
+            direction = signal.direction
+            favorable = (
+                future["High"].astype(float) - signal.entry
+                if direction == 1
+                else signal.entry - future["Low"].astype(float)
+            )
+            adverse = (
+                signal.entry - future["Low"].astype(float)
+                if direction == 1
+                else future["High"].astype(float) - signal.entry
+            )
+            rows.append(
+                {
+                    "signal_time": stamp.isoformat(),
+                    "direction": signal.side,
+                    "entry": signal.entry,
+                    "risk_distance": signal.risk_distance,
+                    "horizon_bars": horizon,
+                    "horizon_end_time": future.index[-1].isoformat(),
+                    "pullback_depth_atr": (
+                        max(0.0, float(bar["VWAP"]) - float(bar["Low"]))
+                        if direction == 1
+                        else max(0.0, float(bar["High"]) - float(bar["VWAP"]))
+                    ) / float(bar["ATR"]),
+                    "vwap_slope_atr": float(bar.get("VWAP_SLOPE_ATR", float("nan"))),
+                    "atr_pct": float(bar.get("ATR_PCT", float("nan"))),
+                    "reclaim_close_distance_atr": (
+                        direction * (float(bar["Close"]) - float(bar["VWAP"]))
+                        / float(bar["ATR"])
+                    ),
+                    "reclaim_candle_range_atr": (
+                        float(bar["High"]) - float(bar["Low"])
+                    ) / float(bar["ATR"]),
+                    "follow_through_r": (
+                        (float(future["Close"].iloc[-1]) - signal.entry)
+                        * direction
+                        / signal.risk_distance
+                    ),
+                    "mfe_r": max(0.0, float(favorable.max())) / signal.risk_distance,
+                    "mae_r": max(0.0, float(adverse.max())) / signal.risk_distance,
+                }
+            )
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "signal_time", "direction", "entry", "risk_distance", "horizon_bars",
+            "horizon_end_time", "pullback_depth_atr", "vwap_slope_atr",
+            "atr_pct", "reclaim_close_distance_atr", "reclaim_candle_range_atr",
+            "follow_through_r", "mfe_r", "mae_r",
+        ],
+    )

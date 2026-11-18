@@ -1,6 +1,6 @@
-import yfinance as yf
-import pandas as pd
 import warnings
+
+import yfinance as yf
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -13,7 +13,10 @@ df = ticker.history(period="max")
 if df.empty:
     print("❌ Failed to download data. Check your internet connection.")
 else:
-    print(f"✅ Data loaded: {len(df)} daily candles from {df.index[0].date()} to {df.index[-1].date()}")
+    print(
+        f"✅ Data loaded: {len(df)} daily candles "
+        f"from {df.index[0].date()} to {df.index[-1].date()}"
+    )
     
     # Calculate Daily True Range (Volatility proxy)
     df['High_Low'] = df['High'] - df['Low']
