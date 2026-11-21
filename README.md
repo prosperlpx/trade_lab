@@ -82,4 +82,5 @@ See [docs/README.md](docs/README.md) for architecture, strategy, configuration, 
 
 ## Attribution
 
-Maintained by **Emiloart**.
+Created by: **prosperlpx** — original concept, VWAP pullback setup, repo founder.
+Maintained by: **Emiloart** — core engine, research pipeline, operations
