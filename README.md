@@ -79,7 +79,3 @@ python scripts/verify_docs.py
 ## Documentation
 
 See [docs/README.md](docs/README.md) for architecture, strategy, configuration, operations, risk, backtesting, decisions, testing, and troubleshooting references.
-
-## Attribution
-
-Maintained by **Emiloart**.
